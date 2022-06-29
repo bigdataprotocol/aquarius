@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: 'aquarius-{{ .Env.CHAIN }}'
+  labels:
+    chain: '{{ .Env.CHAIN }}'
+spec:
+  selector:
+    matchLabels:
+      app: 'aquarius-{{ .Env.CHAIN }}'
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: 'aquarius-{{ .Env.CHAIN }}'
+        image: '{{ .Env.IMAGE_URL }}'
+        resources:
+          limits:
+            cpu: 500m
+            memory: 500Mi
+          requests:
+            cpu: 500m
+            memory: 500Mi

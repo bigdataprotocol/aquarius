@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: 'aquarius-{{ .Env.CHAIN }}'
+  labels:
+    chain: '{{ .Env.CHAIN }}'
+spec:
+  selector:
+    matchLabels:
+      app: 'aquarius-{{ .Env.CHAIN }}'
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app: 'aquarius-{{ .Env.CHAIN }}'
+        chain: '{{ .Env.CHAIN }}'
+    spec:
+      serviceAccountName: aquarius-chain
+      volumes:
+        - name: aquarius-chain-secrets-store-inline
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: 'aquarius-chain-{{ .Env.CHAIN }}-aws-secrets'
+      containers:
+      - name: 'aquarius-{{ .Env.CHAIN }}'
+        image: 'aquarius-{{ .Env.CHAIN }}-image'
+        env:
+          - name: EVENTS_ECIES_PRIVATE_KEY
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: EVENTS_ECIES_PRIVATE_KEY
+          - name: EVENTS_RPC
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: EVENTS_RPC
+          - name: DB_HOSTNAME
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: DB_HOSTNAME
+          - name: DB_PORT
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: DB_PORT
+          - name: DB_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: DB_USERNAME
+          - name: DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: DB_PASSWORD
+          - name: DB_SSL
+            value: 'true'
+          - name: DB_VERIFY_CERTS
+            value: 'true'
+          - name: OCEAN_ADDRESS
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: OCEAN_ADDRESS
+          - name: BFACTORY_BLOCK
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: BFACTORY_BLOCK
+          - name: METADATA_CONTRACT_BLOCK
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: METADATA_CONTRACT_BLOCK
+          - name: ONLY_ENCRYPTED_DDO
+            value: 'true'
+          - name: NETWORK_NAME
+            value: '{{ .Env.CHAIN }}'
+          - name: LOG_LEVEL
+            value: DEBUG
+          - name: ALLOWED_PUBLISHERS
+            valueFrom:
+              secretKeyRef:
+                name: 'aquarius-{{ .Env.CHAIN }}'
+                key: ALLOWED_PUBLISHERS
+          - name: RUN_AQUARIUS_SERVER
+            value: '0'
+          - name: RUN_EVENTS_MONITOR
+            value: '1'
+        volumeMounts:
+          - name: aquarius-chain-secrets-store-inline
+            mountPath: /mnt/secrets
+            readOnly: true

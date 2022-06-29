@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aquarius-rpc
+  namespace: '{{ .Env.NAMESPACE }}'
+  annotations:
+    eks.amazonaws.com/role-arn: '{{ .Env.RPC_ROLE_ARN }}'

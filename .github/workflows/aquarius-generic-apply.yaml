@@ -1,0 +1,258 @@
+name: Aquarius - generic - apply
+
+
+on:
+
+  # push:
+  #   tags:
+  #     - 'prod-v*'
+  #   branches:
+  #     - main
+  #   paths:
+  #     - k8s/base/**
+  #     - k8s/overlays/v3-prod/**
+  #     - .github/workflows/aquarius-v3-prod-apply.yaml
+
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Ocean version
+        required: true
+        default: v3
+        type: choice
+        options:
+        - v3
+      environment:
+        description: Environment
+        required: true
+        default: dev
+        type: choice
+        options:
+        - dev
+        - staging
+        - uat
+        - prod
+
+
+env:
+  # Project
+  # VERSION: v3
+  # ENVIRONMENT: dev
+  VERSION: ${{ github.event.inputs.version }}
+  ENVIRONMENT: ${{ github.event.inputs.environment }}
+
+  # EKS
+  KUBECTL_VERSION: 1.22.6
+  KUBECTL_VERSION_DATE: 2022-03-09
+  GOMPLATE_VERSION: v3.10.0
+
+
+jobs:
+  # Aquarius RPC
+  aquarius-rpc:
+    name: Aquarius RPC
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aquarius RPC - Checkout
+        uses: actions/checkout@v3
+
+      - name: Aquarius RPC - Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets[format('{0}_{1}_AWS_ACCESS_KEY_ID', env.VERSION, env.ENVIRONMENT)] }}
+          aws-secret-access-key: ${{ secrets[format('{0}_{1}_AWS_SECRET_ACCESS_KEY', env.VERSION, env.ENVIRONMENT)] }}
+          aws-region: ${{ secrets[format('{0}_{1}_AWS_REGION', env.VERSION, env.ENVIRONMENT)] }}
+
+      - name: Aquarius RPC - Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Aquarius RPC - Compute variables
+        run: |
+          # Environment
+          DEPLOYMENT_FOLDER="${{ env.VERSION }}-${{ env.ENVIRONMENT }}"
+          [[ -d "k8s/overlays/${DEPLOYMENT_FOLDER}" ]] || DEPLOYMENT_FOLDER="generic"
+          echo "DEPLOYMENT_FOLDER=${DEPLOYMENT_FOLDER}" >> $GITHUB_ENV
+
+          # Cluster
+          echo "CLUSTER_NAME=${{ secrets[format('{0}_{1}_CLUSTER_NAME', env.VERSION, env.ENVIRONMENT)] }}" >> $GITHUB_ENV
+
+          # ECR
+          echo "ECR_REGISTRY=${{ env.ECR_REGISTRY }}" >> $GITHUB_ENV
+          IMAGE_TAG="${ECR_NAME}:${GITHUB_REF_NAME}-rpc-$(git rev-parse --short ${GITHUB_SHA})"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "IMAGE_URL=${{ env.ECR_REGISTRY }}/${IMAGE_TAG}" >> $GITHUB_ENV
+        env:
+          ECR_NAME: ${{ secrets[format('{0}_{1}_ECR_NAME', env.VERSION, env.ENVIRONMENT)] }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+
+      - name: Aquarius RPC - Compute AWS Secrets Manager prefix
+        run: |
+          app=aquarius
+          echo "Check for Custom Secret"
+          custom_secret="$(aws secretsmanager describe-secret --secret-id /${{ env.CLUSTER_NAME }}/${app})" || true
+          if [[ $custom_secret == *"/${{ env.CLUSTER_NAME }}/${app}"* ]]; then
+            echo "Custom Secret exist"
+            echo "SECRET_PREFIX=${{ env.CLUSTER_NAME }}" >> $GITHUB_ENV
+          else
+            echo "Custom Secret not found"
+            echo "Check for Generic Secret"
+            generic_secret="$(aws secretsmanager describe-secret --secret-id /generic/${app})" || true
+            if [[ $generic_secret == *"/generic/${app}"* ]]; then
+              echo "Generic Secret exist"
+              echo "SECRET_PREFIX=generic" >> $GITHUB_ENV
+            else
+              echo "Generic Secret for ${app} doesn't exist - Please create it"
+              exit 1
+            fi
+          fi
+
+      - name: Aquarius RPC - Build and push to Amazon ECR
+        run: |
+          docker build -t ${{ env.IMAGE_TAG }} .
+          docker tag ${{ env.IMAGE_TAG }} ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_TAG }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_TAG }}
+
+      - name: Aquarius RPC - Install gomplate
+        run: |
+          curl -o /usr/local/bin/gomplate -sSL https://github.com/hairyhenderson/gomplate/releases/download/${{ env.GOMPLATE_VERSION }}/gomplate_linux-amd64
+          sudo chmod +x /usr/local/bin/gomplate
+
+      - name: Aquarius RPC - Install kubectl
+        run: |
+          curl -o /usr/local/bin/kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/${{ env.KUBECTL_VERSION }}/${{ env.KUBECTL_VERSION_DATE }}/bin/linux/amd64/kubectl
+          sudo chmod +x /usr/local/bin/kubectl
+
+      - name: Aquarius RPC - Configure kubectl
+        run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }}
+
+      - name: Aquarius RPC - Deploy to EKS
+        run: |
+          # Preprocessing manifests
+          gomplate --input-dir k8s/base/rpc --output-dir k8s/base/rpc
+          gomplate --input-dir k8s/overlays/${{ env.DEPLOYMENT_FOLDER }}/rpc --output-dir k8s/overlays/${{ env.DEPLOYMENT_FOLDER }}/rpc
+
+          # Kustomize and apply
+          cat k8s/base/rpc/namespace.yaml | kubectl apply --wait=true -f -
+          kubectl kustomize k8s/overlays/${{ env.DEPLOYMENT_FOLDER }}/rpc | kubectl apply --namespace ${{ env.NAMESPACE }} --wait=true -f -
+        env:
+          AWS_REGION: ${{ secrets[format('{0}_{1}_AWS_REGION', env.VERSION, env.ENVIRONMENT)] }}
+          RPC_ROLE_ARN: ${{ secrets[format('{0}_{1}_RPC_ROLE_ARN', env.VERSION, env.ENVIRONMENT)] }}
+          NAMESPACE: ${{ env.VERSION }}-${{ env.ENVIRONMENT }}
+
+
+  # Chains
+  chains:
+    name: Chains
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.chains.outputs.list }}
+    steps:
+      - name: Get Chains list
+        id: chains
+        run: echo "::set-output name=list::$(echo ${{ env.CHAINS }} | sed 's/_trim//g' | jq -Rc 'split(" ")')"
+        env:
+          CHAINS: ${{ secrets[format('{0}_{1}_CHAINS', env.VERSION, env.ENVIRONMENT)] }}
+
+
+  # Aquarius Chain
+  aquarius-chain:
+    name: Aquarius Chain
+    runs-on: ubuntu-latest
+    needs: chains
+    strategy:
+      max-parallel: 10
+      fail-fast: false
+      matrix:
+        chain: ${{ fromJSON(needs.chains.outputs.list) }}
+    steps:
+      - name: Aquarius Chain - Checkout
+        uses: actions/checkout@v3
+
+      - name: Aquarius Chain - Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets[format('{0}_{1}_AWS_ACCESS_KEY_ID', env.VERSION, env.ENVIRONMENT)] }}
+          aws-secret-access-key: ${{ secrets[format('{0}_{1}_AWS_SECRET_ACCESS_KEY', env.VERSION, env.ENVIRONMENT)] }}
+          aws-region: ${{ secrets[format('{0}_{1}_AWS_REGION', env.VERSION, env.ENVIRONMENT)] }}
+
+      - name: Aquarius Chain - Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Aquarius Chain - Compute variables
+        run: |
+          # Environment
+          DEPLOYMENT_FOLDER="${{ env.VERSION }}-${{ env.ENVIRONMENT }}"
+          [[ -d "k8s/overlays/${DEPLOYMENT_FOLDER}" ]] || DEPLOYMENT_FOLDER="generic"
+          echo "DEPLOYMENT_FOLDER=${DEPLOYMENT_FOLDER}" >> $GITHUB_ENV
+
+          # Cluster
+          echo "CLUSTER_NAME=${{ secrets[format('{0}_{1}_CLUSTER_NAME', env.VERSION, env.ENVIRONMENT)] }}" >> $GITHUB_ENV
+
+          # ECR
+          echo "ECR_REGISTRY=${{ env.ECR_REGISTRY }}" >> $GITHUB_ENV
+          IMAGE_TAG="${ECR_NAME}:${GITHUB_REF_NAME}-${{ env.CHAIN }}-$(git rev-parse --short ${GITHUB_SHA})"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "IMAGE_URL=${{ env.ECR_REGISTRY }}/${IMAGE_TAG}" >> $GITHUB_ENV
+
+          # Chain
+          echo "CHAIN=${{ env.CHAIN }}" >> $GITHUB_ENV
+        env:
+          CHAIN: ${{ matrix.chain }}
+          ECR_NAME: ${{ secrets[format('{0}_{1}_ECR_NAME', env.VERSION, env.ENVIRONMENT)] }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+
+      - name: Aquarius Chain - Compute AWS Secrets Manager prefix
+        run: |
+          app=aquarius
+          echo "Check for Custom Secret"
+          custom_secret="$(aws secretsmanager describe-secret --secret-id /${{ env.CLUSTER_NAME }}/${app})" || true
+          if [[ $custom_secret == *"/${{ env.CLUSTER_NAME }}/${app}"* ]]; then
+            echo "Custom Secret exist"
+            echo "SECRET_PREFIX=${{ env.CLUSTER_NAME }}" >> $GITHUB_ENV
+          else
+            echo "Custom Secret not found"
+            echo "Check for Generic Secret"
+            generic_secret="$(aws secretsmanager describe-secret --secret-id /generic/${app})" || true
+            if [[ $generic_secret == *"/generic/${app}"* ]]; then
+              echo "Generic Secret exist"
+              echo "SECRET_PREFIX=generic" >> $GITHUB_ENV
+            else
+              echo "Generic Secret for ${app} doesn't exist - Please create it"
+              exit 1
+            fi
+          fi
+
+      - name: Aquarius Chain - Build and push to Amazon ECR
+        run: |
+          docker build -t ${{ env.IMAGE_TAG }} .
+          docker tag ${{ env.IMAGE_TAG }} ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_TAG }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_TAG }}
+
+      - name: Aquarius RPC - Install gomplate
+        run: |
+          curl -o /usr/local/bin/gomplate -sSL https://github.com/hairyhenderson/gomplate/releases/download/${{ env.GOMPLATE_VERSION }}/gomplate_linux-amd64
+          sudo chmod +x /usr/local/bin/gomplate
+
+      - name: Aquarius Chain - Install kubectl
+        run: |
+          curl -o /usr/local/bin/kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/${{ env.KUBECTL_VERSION }}/${{ env.KUBECTL_VERSION_DATE }}/bin/linux/amd64/kubectl
+          sudo chmod +x /usr/local/bin/kubectl
+
+      - name: Aquarius Chain - Configure kubectl
+        run: aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }}
+
+      - name: Aquarius Chain - Deploy to EKS
+        run: |
+          # Preprocessing manifests
+          gomplate --input-dir k8s/base/chain --output-dir k8s/base/chain
+          gomplate --input-dir k8s/overlays/${{ env.DEPLOYMENT_FOLDER }}/chain --output-dir k8s/overlays/${{ env.DEPLOYMENT_FOLDER }}/chain
+
+          # Kustomize and apply
+          cat k8s/base/chain/namespace.yaml | kubectl apply --wait=true -f -
+          kubectl kustomize k8s/overlays/${{ env.DEPLOYMENT_FOLDER }}/chain | kubectl apply --namespace ${{ env.NAMESPACE }} --wait=true -f -
+        env:
+          AWS_REGION: ${{ secrets[format('{0}_{1}_AWS_REGION', env.VERSION, env.ENVIRONMENT)] }}
+          CHAIN_ROLE_ARN: ${{ secrets[format('{0}_{1}_CHAIN_ROLE_ARN', env.VERSION, env.ENVIRONMENT)] }}
+          NAMESPACE: ${{ env.VERSION }}-${{ env.ENVIRONMENT }}
