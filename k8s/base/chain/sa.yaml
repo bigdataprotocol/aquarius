@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aquarius-chain
+  namespace: '{{ .Env.NAMESPACE }}'
+  annotations:
+    eks.amazonaws.com/role-arn: '{{ .Env.CHAIN_ROLE_ARN }}'
