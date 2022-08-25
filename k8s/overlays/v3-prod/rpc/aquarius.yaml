@@ -14,11 +14,11 @@ spec:
         image: '{{ .Env.IMAGE_URL }}'
         resources:
           limits:
-            cpu: 800m
-            memory: 800Mi
+            cpu: 1000m
+            memory: 1000Mi
           requests:
-            cpu: 800m
-            memory: 800Mi
+            cpu: 500m
+            memory: 500Mi
 ---
 apiVersion: autoscaling/v2beta2
 kind: HorizontalPodAutoscaler
